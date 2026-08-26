@@ -44,8 +44,14 @@ class TestResolveDestination:
 
 
 class TestInstallSkill:
+    # These cover copying only. Symlinking is left to manual checking because it
+    # needs Developer Mode on Windows, and a test that skips on the maintainer's
+    # own platform gives false confidence.
+
     @pytest.fixture
     def source(self, tmp_path: Path) -> Path:
+        # Includes a references/ subdirectory so the tests prove the whole skill
+        # folder is installed, not just the SKILL.md at its root.
         skill = tmp_path / "src" / "demo-skill"
         skill.mkdir(parents=True)
         (skill / "SKILL.md").write_text("---\nname: demo-skill\n---\nBody\n", "utf-8")
@@ -81,6 +87,10 @@ class TestInstallSkill:
     ) -> None:
         target_dir = tmp_path / "dest"
         install_skill(source, target_dir, link=False, force=False)
+
+        # A file that exists only in the installed copy. If --force merged
+        # instead of replacing, this would survive and the skill would carry a
+        # stale reference the source no longer has.
         stale = target_dir / "demo-skill" / "stale.md"
         stale.write_text("old", encoding="utf-8")
 

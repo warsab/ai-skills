@@ -93,11 +93,23 @@ def split_frontmatter(text: str) -> tuple[str, str]:
     if not lines or lines[0].strip() != FRONTMATTER_DELIMITER:
         raise ValueError("file must start with a '---' frontmatter delimiter")
 
+    # Close on the FIRST delimiter after the opener. A skill body legitimately
+    # contains '---' as a markdown horizontal rule, so scanning from the end
+    # would swallow the body into the frontmatter.
     for index, line in enumerate(lines[1:], start=1):
         if line.strip() == FRONTMATTER_DELIMITER:
             return "\n".join(lines[1:index]), "\n".join(lines[index + 1 :]).strip()
 
     raise ValueError("frontmatter is never closed with a second '---'")
+
+
+# --------------------------------------------------------------------------- #
+# Field checks
+#
+# Each helper reports every problem it finds rather than returning on the first,
+# so one run surfaces the whole list instead of making the author fix and re-run
+# once per mistake.
+# --------------------------------------------------------------------------- #
 
 
 def _check_name(name: Any, directory: str) -> list[str]:
@@ -110,6 +122,7 @@ def _check_name(name: Any, directory: str) -> list[str]:
     Returns:
         Human-readable problem descriptions; empty when the name is valid.
     """
+    # A bare `name: 2024` parses as an int, so check the type before the rest.
     if not isinstance(name, str):
         return [f"name must be a string, got {type(name).__name__}"]
 
@@ -140,6 +153,9 @@ def _check_description(description: Any) -> list[Problem]:
             Problem("", f"description must be a string, got {type(description).__name__}")
         ]
 
+    # These branches are deliberately exclusive: an empty description is already
+    # reported as an error, and also warning that it is "very short" would just
+    # be noise on top of it.
     problems = []
     if not description.strip():
         problems.append(Problem("", "description must not be empty"))
@@ -176,7 +192,13 @@ def validate_skill(skill_dir: Path) -> list[Problem]:
     problems: list[Problem] = []
 
     def error(message: str) -> None:
+        """Record a spec violation against this skill."""
         problems.append(Problem(name, message))
+
+    # -- Structure -------------------------------------------------------- #
+    # Each of these returns early: without a readable file, parseable
+    # frontmatter and a mapping to inspect, the field checks below have nothing
+    # to work on and would only produce cascading noise.
 
     skill_file = skill_dir / "SKILL.md"
     if not skill_file.is_file():
@@ -189,6 +211,8 @@ def validate_skill(skill_dir: Path) -> list[Problem]:
     except ValueError as problem:
         return [Problem(name, str(problem))]
 
+    # safe_load, never load: a SKILL.md may come from a pull request, and full
+    # YAML loading can construct arbitrary Python objects.
     try:
         frontmatter = yaml.safe_load(frontmatter_text)
     except yaml.YAMLError as problem:
@@ -196,6 +220,11 @@ def validate_skill(skill_dir: Path) -> list[Problem]:
 
     if not isinstance(frontmatter, dict):
         return [Problem(name, "frontmatter must be a mapping of fields")]
+
+    # -- Portability ------------------------------------------------------ #
+    # The check this whole script exists for. A vendor extension such as
+    # Claude Code's argument-hint works locally but is a hard error when the
+    # skill is packaged or uploaded, so it must not reach main.
 
     unexpected = sorted(set(frontmatter) - SPEC_FIELDS)
     if unexpected:
@@ -205,16 +234,25 @@ def validate_skill(skill_dir: Path) -> list[Problem]:
             "rejected when the skill is packaged or uploaded"
         )
 
+    # -- Required fields -------------------------------------------------- #
+
     for field in sorted(REQUIRED_FIELDS - set(frontmatter)):
         error(f"frontmatter is missing the required field '{field}'")
 
+    # Guarded by `in` rather than `.get()`: a missing field was already reported
+    # just above, and checking it again would report the same gap twice.
     if "name" in frontmatter:
         for message in _check_name(frontmatter["name"], name):
             error(message)
 
     if "description" in frontmatter:
+        # _check_description cannot know the skill name, so stamp it on here.
         for problem in _check_description(frontmatter["description"]):
             problems.append(Problem(name, problem.message, problem.is_error))
+
+    # -- Optional fields -------------------------------------------------- #
+    # Present-but-wrong is an error; absent is fine. Hence `.get()` and a None
+    # check rather than the `in` form used for the required fields above.
 
     compatibility = frontmatter.get("compatibility")
     if compatibility is not None:
@@ -229,6 +267,8 @@ def validate_skill(skill_dir: Path) -> list[Problem]:
     if "license" in frontmatter and not isinstance(frontmatter["license"], str):
         error("license must be a string")
 
+    # A YAML list here reads naturally but is not what the spec asks for, and it
+    # is the mistake authors make most often.
     if "allowed-tools" in frontmatter and not isinstance(
         frontmatter["allowed-tools"], str
     ):
@@ -239,12 +279,16 @@ def validate_skill(skill_dir: Path) -> list[Problem]:
         if not isinstance(metadata, dict):
             error("metadata must be a mapping of string keys to string values")
         else:
+            # `version: 1.0` silently becomes a float, which fails packaging
+            # later with a far less helpful message than this one.
             for key, value in metadata.items():
                 if not isinstance(key, str) or not isinstance(value, str):
                     error(
                         f"metadata entry {key!r} must map a string to a string; "
                         "quote values like version numbers"
                     )
+
+    # -- Body ------------------------------------------------------------- #
 
     if not body.strip():
         error("SKILL.md has no body; frontmatter alone gives the agent nothing to do")
@@ -274,8 +318,13 @@ def find_skills(root: Path) -> list[Path]:
     Returns:
         Skill directories, sorted by name.
     """
+    # Accepting a single skill directory as well as a skills directory lets the
+    # same argument work for `validate_skills.py skills/upgrade-dependency`.
     if (root / "SKILL.md").is_file():
         return [root]
+
+    # Non-recursive: a SKILL.md nested deeper is a reference or an example
+    # inside another skill, not a skill in its own right.
     return sorted(path.parent for path in root.glob("*/SKILL.md"))
 
 
@@ -302,6 +351,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    # Collect the skills first so a typo in a path fails immediately, rather
+    # than after validating everything that did resolve.
     skills: list[Path] = []
     for path in args.paths:
         if not path.exists():
@@ -309,6 +360,8 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         skills.extend(find_skills(path))
 
+    # Finding nothing is a failure, not a pass. Otherwise a wrong path or a
+    # renamed directory would let CI go green while checking zero skills.
     if not skills:
         print("ERROR  no skills found; expected directories containing SKILL.md")
         return 1
@@ -325,6 +378,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\n{checked}: {len(errors)} error(s), {len(warnings)} warning(s).")
         return 1
 
+    # Warnings are style advice, so they only fail the run under --strict. CI
+    # uses --strict; a contributor iterating locally does not have to.
     if warnings:
         print(f"\n{checked}: no errors, {len(warnings)} warning(s).")
         return 1 if args.strict else 0

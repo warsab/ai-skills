@@ -115,6 +115,9 @@ class TestSpecViolations:
         "name", ["Upper-Case", "-leading", "trailing-", "double--hyphen", "under_score"]
     )
     def test_invalid_name_characters(self, tmp_path: Path, name: str) -> None:
+        # The directory is given a legal name so the only violation under test
+        # is the frontmatter one. Otherwise every case would also trip the
+        # name-must-match-directory rule and the assertion would prove nothing.
         content = VALID_FRONTMATTER.format(name=name)
         skill = write_skill(tmp_path, name.lower().replace("_", "-"), content)
         assert any("lowercase letters" in message for message in errors_of(skill))
@@ -272,9 +275,16 @@ class TestMain:
 
 class TestThisRepository:
     def test_every_shipped_skill_is_spec_compliant(self) -> None:
+        # Runs the validator over the real skills/ directory, so a violation in
+        # a new skill fails here rather than at upload time in someone's editor.
         skills = find_skills(REPO_ROOT / "skills")
+
+        # Guard against the validator silently passing on an empty list if the
+        # directory is ever moved or renamed.
         assert skills, "the repository should ship at least one skill"
 
+        # Warnings are included deliberately: shipped skills are held to the
+        # stricter bar that CI applies with --strict.
         problems = [
             problem.format() for skill in skills for problem in validate_skill(skill)
         ]

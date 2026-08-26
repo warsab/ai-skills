@@ -22,10 +22,15 @@ import shutil
 import sys
 from pathlib import Path
 
+# Resolved from this file rather than the working directory, so the script works
+# when invoked from anywhere.
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SKILLS_DIR = REPO_ROOT / "skills"
 
-#: Destination for each built-in tool and scope.
+#: Destination for each built-in tool and scope. Personal paths are absolute;
+#: project paths are relative and get joined onto a --dest project root. Only
+#: Claude Code is listed because these are the paths this repository verifies —
+#: guessing another vendor's path would be worse than sending people to its docs.
 KNOWN_DESTINATIONS = {
     ("claude-code", "personal"): Path.home() / ".claude" / "skills",
     ("claude-code", "project"): Path(".claude") / "skills",
@@ -57,11 +62,14 @@ def resolve_destination(tool: str | None, scope: str, dest: Path | None) -> Path
     """
     if dest is not None:
         base = dest.expanduser()
-        # --dest with a tool means "this project root", so keep the tool layout.
+        # --dest alongside --tool means "this project root": append the tool's
+        # own layout so the caller passes a repo path, not a .claude/skills one.
         if tool and (tool, scope) in KNOWN_DESTINATIONS:
             relative = KNOWN_DESTINATIONS[(tool, scope)]
             if not relative.is_absolute():
                 return base / relative
+        # --dest without a tool is an unknown agent: use the path exactly as
+        # given, since we have no layout to assume.
         return base
 
     if tool is None:
@@ -77,6 +85,9 @@ def resolve_destination(tool: str | None, scope: str, dest: Path | None) -> Path
             "see docs/installing.md"
         ) from None
 
+    # A relative entry means the scope is only meaningful against some project,
+    # and none was given — installing into ./.claude/skills of whatever
+    # directory the user happens to be in would be a surprise.
     if not resolved.is_absolute():
         raise ValueError(
             f"{tool} {scope} skills are relative to a project root; "
@@ -103,9 +114,13 @@ def install_skill(source: Path, target_dir: Path, link: bool, force: bool) -> st
     """
     target = target_dir / source.name
 
+    # `or is_symlink()` matters: a symlink whose target has been deleted reports
+    # exists() as False, yet still occupies the path and would break the copy.
     if target.exists() or target.is_symlink():
         if not force:
             raise FileExistsError(f"{target} already exists; pass --force to replace it")
+        # Remove a symlink with unlink, never rmtree — rmtree on a link to the
+        # repo would delete the skill's real source files.
         if target.is_symlink() or target.is_file():
             target.unlink()
         else:
@@ -117,6 +132,8 @@ def install_skill(source: Path, target_dir: Path, link: bool, force: bool) -> st
         try:
             target.symlink_to(source, target_is_directory=True)
         except OSError as problem:
+            # Symlinks need Developer Mode or elevation on Windows, which is the
+            # usual cause here, so name the fix rather than re-raising bare.
             raise OSError(
                 f"could not create a symlink at {target} ({problem}). "
                 "On Windows, enable Developer Mode or drop --link to copy instead"
@@ -178,6 +195,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Error: {problem}", file=sys.stderr)
         return 1
 
+    # Work out the full selection before writing anything, so a typo in --skill
+    # fails before half the skills have been installed.
     everything = available_skills()
     if args.skill:
         by_name = {path.name: path for path in everything}
@@ -207,6 +226,9 @@ def main(argv: list[str] | None = None) -> int:
         try:
             print(f"  {install_skill(source, target_dir, args.link, args.force)}")
         except (FileExistsError, OSError) as problem:
+            # Stop at the first failure rather than continuing. A partial
+            # install is easier to reason about than a scattered one, and the
+            # skills already written are all complete.
             print(f"Error: {problem}", file=sys.stderr)
             return 1
 
